@@ -1,0 +1,189 @@
+---
+title: "Amazon Reviews: Sentiment Analysis to find Postive & Negative Review and model to classify new reviews"
+author: "Vijay S"
+date: "4 September 2018"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(stringr)
+library(plyr)
+library(dplyr)
+library(tidytext)
+library(readxl)
+library(tm)
+library(e1071)
+library(RWeka)
+library(class)
+library(caret)
+```
+
+```{r}
+setwd("E:/PGDDS/Unstructured Data Analystics/Sentiment Analysis")
+amazon_rev = read_excel("Amazon.xlsx")
+```
+
+#### importing the text file containing positive and negative words
+```{r}
+dict = get_sentiments(lexicon = "bing")
+
+negative = filter(dict, sentiment == 'negative')
+positive = filter(dict, sentiment == 'positive')
+positive = c(positive, 'new','nice','good','horizon')
+negative = c(negative, 'wtf','behind','feels','ugly','back','worse','shitty','bad','no','freaking','sucks','horrible')
+```
+
+#### Funtion to find overall sentiment
+```{r}
+score.sentiment = function(amazon_rev, pos, neg){
+  
+  scores = laply(amazon_rev, function(amazon, pos, neg) {
+    
+    amazon = gsub('https://','',amazon) # removes https://
+    amazon = gsub('http://','',amazon) # removes http://
+    amazon = gsub('[^[:graph:]]', ' ',amazon) ## removes graphic characters like emoticons 
+    amazon = gsub('[[:punct:]]', '', amazon) # removes punctuation 
+    amazon = gsub('[[:cntrl:]]', '', amazon) # removes control characters
+    amazon = gsub('\\d+', '', amazon) # removes numbers
+    amazon = tolower(amazon) # makes all letters lowercase
+    
+    word.list = str_split(amazon, '\\s+') # splits the tweets by word in a list
+    
+    words = unlist(word.list) # turns the list into vector
+    
+    pos.matches = match(words, pos) ## returns matching values for words from list 
+    neg.matches = match(words, neg)
+    
+    pos.matches = !is.na(pos.matches) ## converts matching values to true of false
+    neg.matches = !is.na(neg.matches)
+    
+    score = sum(pos.matches) - sum(neg.matches) # true and false are treated as 1 and 0 so they can be added
+    
+    return(score)
+    
+  }, pos, neg )
+  
+  scores.df = data.frame(score=scores, text=amazon_rev)
+  
+  return(scores.df)
+}
+analysis = score.sentiment(amazon_rev$reviews.text, positive, negative)
+```
+
+
+```{r}
+hist(analysis$score)
+table(analysis$score)
+```
+#### Append the score to original dataset
+```{r}
+amazon_rev = cbind(amazon_rev, score = analysis$score)
+amazon = amazon_rev[,-29]
+amazon$sentiment = ifelse(amazon$score == 0,'neutral',ifelse(amazon$score < 0,'negative','positive'))
+names(amazon)[29] = 'polarity'
+```
+
+#### Creating DTM matrix
+```{r}
+model_tweet = select(amazon, reviews.text, polarity)
+
+# Text cleaning
+
+doc = VCorpus(VectorSource(model_tweet$reviews.text))
+
+doc = tm_map(doc, removePunctuation)
+doc = tm_map(doc, content_transformer(tolower))
+doc = tm_map(doc, removeNumbers)
+doc = tm_map(doc, removeWords, stopwords(kind = 'english'))
+doc = tm_map(doc, stripWhitespace)
+
+dtm = DocumentTermMatrix(doc)
+dtm1 = removeSparseTerms(dtm, sparse = 0.97)
+new_df = as.matrix(dtm1)
+```
+
+#### Using Principal Component Analysis to do feature selection
+```{r}
+new_scale = scale(new_df, scale = T)
+eigen_mt = eigen(cor(new_df))
+new_pcs = as.matrix(new_df) %*% eigen_mt$vectors
+percent_new = cumsum(eigen_mt$values / sum(eigen_mt$values) * 100)
+```
+
+#### Plot to find the number of features that contribute to 80% of the data
+```{r}
+plot(cumsum(eigen_mt$values / sum(eigen_mt$values) * 100),type = "l")
+```
+
+#### Selecting those PCs that contribute 80% of data
+```{r}
+pcs_new = new_pcs
+pcs_new[,121:ncol(pcs_new)] = 0
+pcs_new_rec = pcs_new %*% t(eigen_mt$vectors)
+```
+
+#### Plot to compare actual data and PCs
+```{r}
+{{plot(new_scale[,1])
+lines(pcs_new_rec[,1],col="red")}}
+```
+
+#### Final dataframe creation and adding necessary predictor column
+```{r}
+final_new = pcs_new[,c(1:120)]
+final = as.data.frame(final_new, row.names = F)
+final$polarity = model_tweet$polarity
+```
+
+#### Getting the Training and Test data
+```{r}
+new_train = final[sample(1:nrow(final),0.8*nrow(final)),]
+new_test = final[sample(1:nrow(final),0.2*nrow(final)),]
+```
+
+#### Model Creation
+- KNN classification model to find the polarity of the customer review
+- Converting predictor and polarity column to factor type to pass it to confusion matrix
+- Finally checking for accuracy, Kappa score, Sensitivity & Specificity of the model
+```{r}
+new_test$predict = knn(new_train %>% select(-polarity), new_test %>% select(-polarity), 
+                       cl = as.factor(new_train$polarity), k = 3)
+
+new_test$polarity = as.factor(new_test$polarity)
+new_test$predict = as.factor(new_test$predict)
+
+cm = confusionMatrix(new_test$predict,new_test$polarity,positive = "1")
+```
+
+#### Confusion Matrix
+```{r}
+cm$table
+```
+
+#### Overall Accuracy of the Model
+```{r}
+cm$overall['Accuracy']*100
+```
+
+#### Models accuracy in finding positive reviews
+```{r}
+cm$byClass[,'Sensitivity']*100
+```
+
+#### Models accuracy in finding negative reviews
+```{r}
+cm$byClass[,'Specificity']*100
+```
+
+#### Models overall accuracy in finding positive reviews as positive and negative reviews as negative
+- If the score is less than 0.5 the model is bad
+- If the score is greater than 0.5 then the model is good
+```{r}
+cm$overall['Kappa']
+```
+
+
+
+
